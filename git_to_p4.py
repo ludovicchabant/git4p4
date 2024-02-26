@@ -23,7 +23,7 @@ def main():
     parser.add_argument(
         "range",
         nargs='?',
-        help="The git commit, or range of git commits, to convert")
+        help="The git commit, or range of git commits, to convert (defaults to p4..master)")
 
     # Convenience flags.
     parser.add_argument(
@@ -105,9 +105,7 @@ def main():
     if args.range and ".." in args.range:
         hash_range = args.range
     else:
-        hash_range = "%s..%s" % (p4_hash, (args.range or 'HEAD'))
-        #commit_hash = args.range or 'HEAD'
-        #hash_range = "%s^..%s" % (commit_hash, commit_hash)
+        hash_range = "%s..%s" % (p4_hash, (args.range or 'master'))
     commit_list = git.run_command(["rev-list", "--ancestry-path", hash_range],
                                   split_lines=True)
     if not commit_list:
