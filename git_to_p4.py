@@ -55,6 +55,9 @@ def main():
         "--no-p4-branch",
         action="store_true",
         help="Don't auto-manage the p4 branch head")
+    parser.add_argument(
+        "--rename-threshold", type=int,
+        help="Specify a threshold for git to detect file renames")
 
     # Troubleshooting flags.
     parser.add_argument(
@@ -151,18 +154,31 @@ def main():
     # Start going through the list!
     ret_status = 0
     last_processed_commit_idx = -1
+    rename_detect_arg = '-M'
+    if args.rename_threshold:
+        rename_detect_arg += str(args.rename_threshold)
     for commit_idx, commit in enumerate(commit_list):
         # Get the commit message.
         commit_msg = git.run_command(["log", "--format=%B", "-n", "1", commit])
 
         # Get the full paths of files in this commit, along with their status
         # (modified, added, removed).
-        commit_diff_files = git.run_command(["diff-tree", "--no-commit-id", "--name-status", "-r", commit],
-                                    split_lines=True)
-        git_file_list = list([
-            os.path.join(git_root, f[1:].lstrip().replace("/", os.sep))
-            for f in commit_diff_files])
+        commit_diff_files = git.run_command(
+            ["diff-tree", "--no-commit-id", "--name-status", "-r", rename_detect_arg, commit],
+            split_lines=True)
+        git_file_list = []
+        git_file_renamed_from_list = []
+        for f in commit_diff_files:
+            relpaths = tuple(relpath.replace('/', os.sep) for relpath in f.split('\t')[1:])
+            if f[0] != "R":
+                git_file_renamed_from_list.append(None)
+                git_file_list.append(os.path.join(git_root, relpaths[0]))
+            else:
+                git_file_renamed_from_list.append(os.path.join(git_root, relpaths[0]))
+                git_file_list.append(os.path.join(git_root, relpaths[1]))
         git_file_statuses = list([f[0] for f in commit_diff_files])
+
+        git_all_files = git_file_list + list(filter(lambda f: f is not None, git_file_renamed_from_list))
 
         logger.info("------------------------------------------")
         logger.info("[%s] %s" % (commit, commit_msg.splitlines()[0]))
@@ -185,11 +201,11 @@ def main():
                     p4_opened_files.add(p4_f["path"])
 
                 # Check this list against the commit's file list.
-                if p4_opened_files.difference(git_file_list):
+                if p4_opened_files.difference(git_all_files):
                     logger.error(
                         "Found changelist %s with same description as commit %s but different files." %
                         (p4_reusable_cl, commit))
-                    logger.info("Commit files: \n%s" % "\n".join(git_file_list))
+                    logger.info("Commit files: \n%s" % "\n".join(git_all_files))
                     logger.info("Changelist: \n%s" % "\n".join(p4_opened_files))
                     ret_status = 1
                     break
@@ -202,7 +218,7 @@ def main():
         # Check if any files are already open in a pending changelist in p4.
         if check_file_list:
             files_already_in_cl = set()
-            for f in git_file_list:
+            for f in git_all_files:
                 if f in files_in_p4_pending_cls:
                     files_already_in_cl.add(f)
                 # Also add these files to our list of files open in p4 since
@@ -221,16 +237,19 @@ def main():
         # Figure out what files need to be open for edit/add/delete.
         p4_to_add = set()
         p4_to_edit = set()
+        p4_to_rename = set()
         p4_to_delete = set()
-        for f, stat in zip(git_file_list, git_file_statuses):
+        for f, old_f, stat in zip(git_file_list, git_file_renamed_from_list, git_file_statuses):
             if stat == 'A':
                 p4_to_add.add(f)
             elif stat == 'M':
                 p4_to_edit.add(f)
+            elif stat[0] == 'R':
+                p4_to_rename.add((old_f, f))
             elif stat == 'D':
                 p4_to_delete.add(f)
             else:
-                logger.error("Unknown status '%s' for file: %s" % (stat, f))
+                logger.error("Unsupported status '%s' for file: %s" % (stat, f))
                 ret_status = 1
                 break
         if ret_status > 0:
@@ -257,13 +276,20 @@ def main():
                 new_cl_id = p4.get_created_changelist_id(p4_created)
 
             # Open/add/delete files in p4.
-            for paths, cmd in [(p4_to_add, "add"), (p4_to_edit, "edit"), (p4_to_delete, "delete")]:
+            for paths, cmd in [
+                    (p4_to_add, "add"),
+                    (p4_to_edit, "edit"),
+                    (p4_to_delete, "delete")]:
                 if paths:
                     p4_open_cmdline = [cmd] + list(paths)
                     p4.run_command(p4_open_cmdline)
+            # Do moves differently: we need to do them one by one since we need to specify
+            # the old/new paths, and since the move already happened, we pass -k.
+            for old_path, path in p4_to_rename:
+                p4.run_command(["move", "-k", old_path, path])
 
             # Move all these files into the appropriate changelist.
-            p4_reopen_cmdline = ["reopen", "-c", new_cl_id] + git_file_list
+            p4_reopen_cmdline = ["reopen", "-c", new_cl_id] + git_all_files
             p4.run_command(p4_reopen_cmdline)
 
             # Shelve this changelist. This is because we may modify the same files
@@ -286,6 +312,10 @@ def main():
                 logger.info("Would open %d files for edit:" % len(p4_to_edit))
                 for f in p4_to_edit:
                     logger.info(" - %s" % f)
+            if p4_to_rename:
+                logger.info("Would open %d files for move:" % len(p4_to_rename))
+                for old_f, f in p4_to_rename:
+                    logger.info(" - %s -> %s" % (old_f, f))
             if p4_to_delete:
                 logger.info("Would open %d files for delete:" % len(p4_to_delete))
                 for f in p4_to_delete:
