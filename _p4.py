@@ -30,7 +30,7 @@ def encode_dict(d):
 
 def run_command(cmdargs, stdin=None, stdin_mode='w+b',
                 only1=None, raise_error=True):
-    cmdline = ['p4', '-G', '-z', 'tag'] + cmdargs
+    cmdline = ['p4', '-G', '-zprog=git4p4', '-ztag'] + cmdargs
 
     stdin_file = None
     if stdin:
