@@ -97,10 +97,15 @@ def main():
     # Look for the p4 branch head.
     try:
         p4_hash = git.run_command(["rev-parse", "p4"]).strip()
-        logger.debug("P4 branch is at [%s]" % p4_hash)
+        logger.debug("P4 branch is currently at [%s]" % p4_hash)
     except git.GitError:
         logger.warning("No P4 branch found, will start from HEAD")
         p4_hash = 'HEAD'
+
+    # Get the default branch and see where it's at.
+    git_default_branch = git.run_command(['var', 'GIT_DEFAULT_BRANCH']).strip()
+    master_hash = git.run_command(['rev-parse', git_default_branch]).strip()
+    logger.debug("Git default branch is '%s', currently at [%s]" % (git_default_branch, master_hash))
 
     # Figure out the range of commits to convert.
     # Either a given range, or everything since p4 up to HEAD or to the given
@@ -108,7 +113,7 @@ def main():
     if args.range and ".." in args.range:
         hash_range = args.range
     else:
-        hash_range = "%s..%s" % (p4_hash, (args.range or 'master'))
+        hash_range = "%s..%s" % (p4_hash, (args.range or git_default_branch))
     commit_list = git.run_command(["rev-list", "--ancestry-path", hash_range],
                                   split_lines=True)
     if not commit_list:
@@ -333,16 +338,9 @@ def main():
         last_processed_commit_idx = commit_idx
         logger.info("")
 
-    return_hash = current_branch or current_head
-    if return_hash and not args.stay:
-        if not args.dry_run:
-            logger.info("Returning HEAD to %s" % return_hash)
-            git.run_command(["checkout", return_hash])
-        else:
-            logger.info("Would return HEAD to %s" % return_hash)
-    else:
-        logger.warning("Leaving HEAD where it is.")
-
+    # Finished converting commits! If we are auto-managing the `p4` branch,
+    # move it to the last converted commmit. If not, print a message for the
+    # user to do it themselves.
     logger.info("Converted commits: %d" % (last_processed_commit_idx + 1))
     new_p4_head = commit_list[last_processed_commit_idx]
     if not args.no_p4_branch:
@@ -357,6 +355,30 @@ def main():
             "You can reset the p4 branch to %s once done "
             "(git checkout p4; git reset --hard %s)" %
             new_p4_head)
+
+    # If we are not told to stay on the last converted commit, return HEAD
+    # to what it was before we ran this script.
+    return_hash = current_branch or current_head
+    if return_hash and not args.stay:
+        if not args.dry_run:
+            logger.info("Returning HEAD to %s" % return_hash)
+            git.run_command(["checkout", return_hash])
+        else:
+            logger.info("Would return HEAD to %s" % return_hash)
+    else:
+        logger.warning("Leaving HEAD where it is.")
+
+    # Re-grab the current head, and see if it matches our default branch.
+    # If we are auto-managing the `p4` branch and we just finished converting
+    # all commits, both the `p4` and default branch are now synced up. Let's
+    # switch back to the default branch.
+    current_head = git.run_command(["rev-parse", "HEAD"]).strip()
+    if not args.no_p4_branch and (current_head == master_hash):
+        if not args.dry_run:
+            logger.info("Switching back to default branch '%s'." % git_default_branch)
+            git.run_command(['checkout', git_default_branch])
+        else:
+            logger.info("Would switch back to default branch '%s'." % git_default_branch)
 
 
 if __name__ == '__main__':
