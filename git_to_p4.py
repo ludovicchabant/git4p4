@@ -256,6 +256,12 @@ def main():
             logger.error("Ending conversion.")
             break
 
+        if p4_to_rename:
+            old_local_to_depot_paths = []
+            fstat_old_paths = p4.run_command(["fstat"] + [ren[0] for ren in p4_to_rename])
+            for entry in p4.get_all_code_entries('stat', fstat_old_paths):
+                old_local_to_depot_paths.append(entry['depotFile'])
+
         if not args.dry_run:
             # Move to the current commit.
             git.run_command(["checkout", commit])
@@ -283,9 +289,12 @@ def main():
                 if paths:
                     p4_open_cmdline = [cmd] + list(paths)
                     p4.run_command(p4_open_cmdline)
-            # Do moves differently: we need to do them one by one since we need to specify
-            # the old/new paths, and since the move already happened, we pass -k.
-            for old_path, path in p4_to_rename:
+            # Do moves differently: we need to do them one by one since we need to first make
+            # sure the old file is open for edit, and then do the move. Since all of this
+            # already happened locally, we need to pass -k to everything.
+            for i, (old_path, path) in enumerate(iter(p4_to_rename)):
+                old_depot_path = old_local_to_depot_paths[i]
+                p4.run_command(["edit", "-k", old_depot_path])
                 p4.run_command(["move", "-k", old_path, path])
 
             # Move all these files into the appropriate changelist.
